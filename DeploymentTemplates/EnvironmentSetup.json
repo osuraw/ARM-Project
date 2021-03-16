@@ -1,0 +1,146 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "ResourcePrefix":{
+            "type": "string"
+        },
+        "ApplicationPrefix": {
+            "type": "string"
+        },
+        "AdminPassword": {
+            "type": "securestring"
+        }
+    },
+    "variables": {
+        "StorageAccountName": "[toLower(concat(parameters('ResourcePrefix'),'logst'))]",
+        "serverName": "[toLower(concat(parameters('ResourcePrefix'),'logserver'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2021-01-01",
+            "name": "[variables('StorageAccountName')]",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName": "Storage",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "sku": {
+                "tier": "Standard",
+                "name": "Standard_LRS"
+            },
+            "kind": "StorageV2",
+            "properties": {
+                "minimumTlsVersion": "TLS1_2",
+                "allowBlobPublicAccess": true,
+                "networkAcls": {
+                    "bypass": "AzureServices",
+                    "virtualNetworkRules": [],
+                    "ipRules": [],
+                    "defaultAction": "Allow"
+                },
+                "supportsHttpsTrafficOnly": true,
+                "accessTier": "Cool"
+            },
+            "resources": [
+                {
+                    "type": "blobServices/containers",
+                    "apiVersion": "2021-01-01",
+                    "name": "default/logcontainer",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', variables('StorageAccountName'))]"
+                    ],
+                    "properties": {
+                        "publicAccess": "None"
+                    }
+                },
+                {
+                    "type": "blobServices/containers",
+                    "apiVersion": "2021-01-01",
+                    "name": "default/public",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', variables('StorageAccountName'))]"
+                    ],
+                    "properties": {
+                        "publicAccess": "Blob"
+                    }
+                },
+                {
+                    "type": "blobServices/containers",
+                    "apiVersion": "2021-01-01",
+                    "name": "default/private",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Storage/storageAccounts', variables('StorageAccountName'))]"
+                    ],
+                    "properties": {
+                        "publicAccess": "None"
+                    }
+                }
+            ]
+        },
+        {
+            "type": "Microsoft.Sql/servers",
+            "apiVersion": "2020-02-02-preview",
+            "name": "[variables('serverName')]",
+            "location": "[resourceGroup().location]",
+            "tags":{
+                "displayName": "SQL Server",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "properties": {
+                "administratorLogin": "defaultadmin",
+                "administratorLoginPassword": "[parameters('AdminPassword')]"
+            },
+            "resources": [
+                {
+                    "type": "databases",
+                    "apiVersion": "2020-08-01-preview",
+                    "name": "LogDB",
+                    "location": "[resourceGroup().location]",
+                    "tags": {
+                        "displayName": "SQL DB",
+                        "Application": "[parameters('ApplicationPrefix')]"
+                    },
+                    "sku": {
+                        "name": "Standard",
+                        "tier": "Standard"
+                    },
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Sql/servers', concat(variables('serverName')))]"
+                    ]
+                },
+                {
+                    "name": "AllowAllIps",
+                    "type": "firewallRules",
+                    "apiVersion": "2020-08-01-preview",
+                    "properties": {
+                        "startIpAddress": "0.0.0.0",
+                        "endIpAddress": "255.255.255.255"
+                    },
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Sql/servers', concat(variables('serverName')))]"
+                    ]
+                }
+            ]
+        }
+    ],
+    "outputs": {
+        "StorageAccountName": {
+            "type": "string",
+            "value": "[variables('StorageAccountName')]"
+        },
+        "DBServerName": {
+            "type": "string",
+            "value": "[concat(variables('serverName'),'.database.windows.net')]"
+        },
+        "DBName": {
+            "type": "string",
+            "value": "LogDB"
+        },
+        "DBUserName": {
+            "type": "string",
+            "value": "defaultadmin"
+        }
+    }
+}

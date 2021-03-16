@@ -1,0 +1,586 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "ResourcePrefix":{
+            "type": "string"
+        },
+        "ApplicationPrefix": {
+            "type": "string"
+        },
+        "VmCount": {
+            "type": "int"
+        },
+        "VM_Size": {
+            "type": "string",
+            "allowedValues": [
+                "Standard_B1ms",
+                "Standard_B2ms",
+                "Standard_B2s",
+                "Standard_B4ms"
+            ]
+        },
+        "Username": {
+            "type": "string"
+        },
+        "Password": {
+            "type": "securestring"
+        },
+        "StorageAccountName": {
+            "type": "string"
+        },
+        "StorageContainerSASKey": {
+            "type": "string"
+        },
+        "ContainerUrl": {
+            "type": "string"
+        }
+    },
+    "variables": {
+        "PublicIpName":"[concat(parameters('ResourcePrefix'),'-PublicIP')]",
+        "vNetName": "[concat(parameters('ResourcePrefix'),'-vNet')]",
+        "SubnetName-1": "[concat(parameters('ResourcePrefix'),'-WebServers')]",
+        "LBPublicName": "[concat(parameters('ResourcePrefix'),'-LB-Public')]",
+        "AVsetName":"[concat(parameters('ResourcePrefix'),'-AVset')]",
+        "VMName":"[concat(parameters('ResourcePrefix'),'-Vm-')]",
+        "ContainerUri":"[concat('https://',parameters('StorageAccountName'),'.blob.core.windows.net/private/')]",
+        "SSHDURL":"[concat(parameters('ContainerUrl'),'/sshd_config')]",
+        "PubKeyURL":"[concat(parameters('ContainerUrl'),'/id_rsa.pub')]",
+        "AppUrl":"[concat(parameters('ContainerUrl'),'/publish.zip')]",
+        "MainScript":"MainScript.ps1",
+        "RunAsAdminScript":"RunAsDefaultAdmin.ps1",
+        "SSHScript":"ConfigureSSH.ps1",
+        "WebServiceScript":"ConfigureWebService.ps1",
+        "Arguments":"[concat(' -Password ',parameters('Password'),' -SshdURL ',variables('SSHDURL'),' -PublicKeyUrl ',variables('PubKeyURL'),' -AppUrl ',variables('AppUrl'))]"
+    },
+    "resources": [
+        {
+            "name": "[variables('PublicIpName')]",
+            "type": "Microsoft.Network/publicIPAddresses",
+            "apiVersion": "2019-11-01",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName": "public-IP",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "sku": {
+                "name": "Basic"
+            },
+            "properties": {
+                "publicIPAllocationMethod": "Dynamic",
+                "publicIPAddressVersion": "IPv4",
+                "idleTimeoutInMinutes": 4,
+                "dnsSettings": {
+                    "domainNameLabel": "[toLower(concat(parameters('ResourcePrefix'),'web'))]",
+                    "fqdn": "[toLower(concat('web','.',resourceGroup().location,'.cloudapp.azure.com'))]"
+                }
+            }
+        },
+        {
+            "name": "[variables('vNetName')]",
+            "type": "Microsoft.Network/virtualNetworks",
+            "location": "[resourceGroup().location]",
+            "apiVersion": "2019-11-01",
+            "dependsOn": [],
+            "tags": {
+                "displayName": "Virtual-Network",                
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "copy": {
+                "name": "vNET-Copy",
+                "count": 1
+            },
+            "properties": {
+                "addressSpace": {
+                "addressPrefixes": [
+                    "10.0.0.0/16"
+                ]
+                },
+                "subnets": [
+                {
+                    "name": "[variables('SubnetName-1')]",
+                    "properties": {
+                    "addressPrefix": "10.0.0.0/26"
+                    }
+                }
+                ]
+            }
+        },
+        {
+            "apiVersion": "2019-11-01",
+            "name": "[variables('LBPublicName')]",
+            "type": "Microsoft.Network/loadBalancers",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName": "Load Balancer",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "sku": {
+                "name": "Basic"
+            },
+            "dependsOn": [
+                "[resourceId(resourceGroup().name,'Microsoft.Network/publicIPAddresses',variables('PublicIpName'))]"
+            ],
+            "properties": {
+                "frontendIPConfigurations": [
+                    {
+                        "name": "[concat(variables('LBPublicName'),'-Frountend')]",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "publicIPAddress": {
+                                "id": "[resourceId(resourceGroup().name,'Microsoft.Network/publicIPAddresses',variables('PublicIpName'))]"
+                            }
+                        }
+                    }
+                ],
+                "backendAddressPools": [
+                    {
+                        "name": "[concat(variables('LBPublicName'),'-BackendPool')]",
+                        "type":"Microsoft.Network/loadBalancers/backendAddressPools"
+                    }
+                ],                
+                "probes": [
+                    {
+                        "name": "[concat(variables('LBPublicName'),'-Prob-1')]",
+                        "type": "Microsoft.Network/loadBalancers/probes",
+                        "properties": {
+                        "protocol": "Tcp",
+                        "port": 80,
+                        "intervalInSeconds": 10,
+                        "numberOfProbes": 2
+                        }
+                    }
+                ],
+                "loadBalancingRules": [
+                    {
+                        "name": "[concat(variables('LBPublicName'),'-LBRule-1')]",
+                        "type": "Microsoft.Network/loadBalancers/loadBalancingRules",
+                        "properties": {
+                            "frontendPort": 80,
+                            "backendPort": 80,
+                            "enableFloatingIP": false,
+                            "idleTimeoutInMinutes": 4,
+                            "protocol": "Tcp",
+                            "loadDistribution": "Default",
+                            "frontendIPConfiguration": {
+                                "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/frontendIPConfigurations',variables('LBPublicName'), concat(variables('LBPublicName'),'-Frountend'))]"
+                            },
+                            "backendAddressPool": {
+                                "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/backendAddressPools',variables('LBPublicName'), concat(variables('LBPublicName'),'-BackendPool'))]"
+                            },
+                            "probe": {
+                                "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/probes',variables('LBPublicName'),concat(variables('LBPublicName'),'-Prob-1'))]"
+                            }
+                        }
+                    }
+                ]               
+            }
+        },
+        {
+            "type": "Microsoft.Network/loadBalancers/inboundNatRules",
+            "apiVersion": "2020-05-01",
+            "name": "[concat(variables('LBPublicName'),'/SSH-NAT-Rule-',copyIndex(1))]",
+            "dependsOn": [
+                "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers', variables('LBPublicName'))]"
+            ],
+            "copy": {
+                "name": "SSH-NAT-Rule-Copy",
+                "count": "[parameters('VmCount')]"
+            },
+            "properties": {
+                "frontendIPConfiguration": {
+                    "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/frontendIPConfigurations',variables('LBPublicName'), concat(variables('LBPublicName'),'-Frountend'))]"
+                },
+                "frontendPort": "[copyIndex(220)]",
+                "backendPort": 22,
+                "enableFloatingIP": false,
+                "idleTimeoutInMinutes": 4,
+                "protocol": "Tcp",
+                "enableTcpReset": false
+            }
+        },
+        {
+            "type": "Microsoft.Network/loadBalancers/inboundNatRules",
+            "apiVersion": "2020-05-01",
+            "name": "[concat(variables('LBPublicName'),'/RDP-NAT-Rule-',copyIndex(1))]",
+            "dependsOn": [
+                "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers', variables('LBPublicName'))]"
+            ],
+            "copy": {
+                "name": "RDP-NAT-Rule-Copy",
+                "count": "[parameters('VmCount')]"
+            },
+            "properties": {
+                "frontendIPConfiguration": {
+                    "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/frontendIPConfigurations',variables('LBPublicName'), concat(variables('LBPublicName'),'-Frountend'))]"
+                },
+                "frontendPort": "[copyIndex(3389)]",
+                "backendPort": 3389,
+                "enableFloatingIP": false,
+                "idleTimeoutInMinutes": 4,
+                "protocol": "Tcp",
+                "enableTcpReset": false
+            }
+        },
+        {
+            "type": "Microsoft.Compute/availabilitySets",
+            "name": "[concat(variables('AVsetName'))]",
+            "apiVersion": "2019-07-01",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Aligned" //for virtual machines with managed disks
+            },
+            "tags": {
+                "displayName": "Availability Set",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "properties": {
+                "platformFaultDomainCount": 3,
+                "platformUpdateDomainCount": 5
+            }
+        },
+        {
+            "name": "[toLower(concat(parameters('ResourcePrefix'),'vm',copyIndex(1),'st'))]",
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2019-06-01",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName": "Storage Account",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "copy": {
+                "name": "Copy-VM-Storage",
+                "count": "[parameters('VmCount')]"
+            },
+            "sku": {
+                "name": "Standard_LRS"
+            },
+            "kind": "Storage"
+        },
+        {
+            "name": "[concat(variables('VMName'),'NSG')]",
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "apiVersion": "2018-08-01",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "displayName":"NSG",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "properties": {
+                "securityRules": [
+                    {
+                        "name": "NSG-Rule-1",
+                        "properties": {
+                            "description": "Open Web Port(80)",
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "80",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 100,
+                            "direction": "Inbound"
+                        }
+                    },
+                    {
+                        "name": "NSG-Rule-2",
+                        "properties": {
+                            "description": "Open SSH Port(22)",
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "22",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 110,
+                            "direction": "Inbound"
+                        }
+                    },
+                    {
+                        "name": "NSG-Rule-3",
+                        "properties": {
+                            "description": "Open RDP Port(3389)",
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "3389",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 120,
+                            "direction": "Inbound"
+                        }
+                    }
+                ],
+                "defaultSecurityRules": [
+                    {
+                        "name": "AllowVnetInBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Allow inbound traffic from all VMs in VNET",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "VirtualNetwork",
+                        "destinationAddressPrefix": "VirtualNetwork",
+                        "access": "Allow",
+                        "priority": 65000,
+                        "direction": "Inbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowAzureLoadBalancerInBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Allow inbound traffic from azure load balancer",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "AzureLoadBalancer",
+                        "destinationAddressPrefix": "*",
+                        "access": "Allow",
+                        "priority": 65001,
+                        "direction": "Inbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "DenyAllInBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Deny all inbound traffic",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "*",
+                        "destinationAddressPrefix": "*",
+                        "access": "Deny",
+                        "priority": 65500,
+                        "direction": "Inbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowVnetOutBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Allow outbound traffic from all VMs to all VMs in VNET",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "VirtualNetwork",
+                        "destinationAddressPrefix": "VirtualNetwork",
+                        "access": "Allow",
+                        "priority": 65000,
+                        "direction": "Outbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowInternetOutBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Allow outbound traffic from all VMs to Internet",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "*",
+                        "destinationAddressPrefix": "Internet",
+                        "access": "Allow",
+                        "priority": 65001,
+                        "direction": "Outbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "DenyAllOutBound",
+                        "type": "Microsoft.Network/networkSecurityGroups/defaultSecurityRules",
+                        "properties": {
+                        "description": "Deny all outbound traffic",
+                        "protocol": "*",
+                        "sourcePortRange": "*",
+                        "destinationPortRange": "*",
+                        "sourceAddressPrefix": "*",
+                        "destinationAddressPrefix": "*",
+                        "access": "Deny",
+                        "priority": 65500,
+                        "direction": "Outbound",
+                        "sourcePortRanges": [],
+                        "destinationPortRanges": [],
+                        "sourceAddressPrefixes": [],
+                        "destinationAddressPrefixes": []
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "name": "[concat(variables('VMName'),'NIC-',copyIndex(1))]",
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2019-11-01",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('vNetName'))]",
+                "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers', variables('LBPublicName'))]",
+                "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/inboundNatRules/',variables('LBPublicName'),concat('SSH-NAT-Rule-',copyIndex(1)))]",
+                "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/inboundNatRules/',variables('LBPublicName'),concat('RDP-NAT-Rule-',copyIndex(1)))]"
+            ],
+            "tags": {
+                "displayName": "Network Interface",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "copy": {
+                "name": "Copy-VM-NIC",
+                "count": "[parameters('VmCount')]"
+            },
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipConfig-1",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "subnet": {
+                                "id": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks/subnets', variables('vNetName'), variables('SubnetName-1'))]"
+                            },
+                            "loadBalancerBackendAddressPools": [
+                                {
+                                    "id": "[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/backendAddressPools',variables('LBPublicName'),concat(variables('LBPublicName'),'-BackendPool'))]"
+                                }
+                            ],
+                            "loadBalancerInboundNatRules": [
+                                {
+                                    "id":"[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/inboundNatRules/',variables('LBPublicName'),concat('SSH-NAT-Rule-',copyIndex(1)))]"
+                                },
+                                {
+                                    "id":"[resourceId(resourceGroup().name,'Microsoft.Network/loadBalancers/inboundNatRules/',variables('LBPublicName'),concat('RDP-NAT-Rule-',copyIndex(1)))]"
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "networkSecurityGroup": {
+                    "id": "[resourceId(resourceGroup().name,'Microsoft.Network/networkSecurityGroups',concat(variables('VMName'),'NSG'))]"
+                }
+            }
+        },
+        {
+            "name": "[concat(variables('VMName'),copyIndex(1))]",
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2019-07-01",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "Copy-VM-Storage",
+                "Copy-VM-NIC",
+                "[resourceId(resourceGroup().name,'Microsoft.Compute/availabilitySets', concat(variables('AVsetName')))]"
+            ],
+            "tags": {
+                "displayName": "Windows VM",
+                "Application": "[parameters('ApplicationPrefix')]"
+            },
+            "copy": {
+                "name": "Copy-VM",
+                "count": "[parameters('VmCount')]"
+            },
+            "properties": {
+                "availabilitySet": {
+                    "id": "[resourceId(resourceGroup().name,'Microsoft.Compute/availabilitySets', concat(variables('AVsetName')))]"
+                },
+                "hardwareProfile": {
+                    "vmSize": "[parameters('VM_Size')]"
+                },
+                "osProfile": {
+                    "computerName": "[concat('windows-',copyIndex(1))]",
+                    "adminUsername": "[parameters('Username')]",
+                    "adminPassword": "[parameters('Password')]"
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "MicrosoftWindowsServer",
+                        "offer": "WindowsServer",
+                        "sku": "2019-Datacenter",
+                        "version": "latest"
+                    },
+                    "osDisk": {
+                        "name": "[toLower(concat(parameters('ResourcePrefix'),'vm',copyIndex(1),'st'))]",
+                        "caching": "ReadWrite",
+                        "createOption": "FromImage"
+                    }
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId(resourceGroup().name,'Microsoft.Network/networkInterfaces', concat(variables('VMName'),'NIC-',copyIndex(1)))]"
+                        }
+                    ]
+                },
+                "diagnosticsProfile": {
+                    "bootDiagnostics": {
+                        "enabled": true,
+                        "storageUri": "[reference(resourceId(resourceGroup().name,'Microsoft.Storage/storageAccounts/', toLower(concat(parameters('ResourcePrefix'),'vm',copyIndex(1),'st')))).primaryEndpoints.blob]"
+                    }
+                }
+            },
+            "resources": [
+             {
+                 "name": "[concat(variables('VMName'),copyIndex(1),'/Script1')]",
+                 "type": "Microsoft.Compute/virtualMachines/extensions",
+                 "apiVersion": "2019-07-01",
+                 "location": "[resourceGroup().location]",
+                 "tags": {
+                     "displayName": "Script Extention"
+                 },
+                 "dependsOn": [
+                     "[concat(variables('VMName'),copyIndex(1))]"
+                 ],
+                 "properties": {
+                     "publisher": "Microsoft.Compute",
+                     "type": "CustomScriptExtension",
+                     "typeHandlerVersion": "1.10",
+                     "autoUpgradeMinorVersion": true,
+                     "settings": {
+                         "timestamp":1234567100,
+                         "fileUris": [
+                             "[concat(variables('ContainerUri'),variables('MainScript'), parameters('StorageContainerSASKey'))]",
+                             "[concat(variables('ContainerUri'),variables('RunAsAdminScript'), parameters('StorageContainerSASKey'))]",
+                             "[concat(variables('ContainerUri'),variables('SSHScript'), parameters('StorageContainerSASKey'))]",
+                             "[concat(variables('ContainerUri'),variables('WebServiceScript'), parameters('StorageContainerSASKey'))]"
+                         ]
+                     },
+                     "protectedSettings": {
+                        "commandToExecute": "[concat('powershell.exe -ExecutionPolicy Unrestricted -File ',variables('MainScript'),' ',variables('Arguments'))]"
+                     }
+                 }                
+             }
+            ]
+        }
+    ],
+    "outputs": {
+        "PublicIpFQDN": {
+            "type": "string",
+            "value": "[reference(concat('Microsoft.Network/publicIPAddresses/',variables('PublicIpName'))).dnsSettings.fqdn]"
+        },
+        "VmUsername": {
+            "type": "string",
+            "value": "[parameters('Username')]"
+        },
+        "NumberOfVMInstances": {
+            "type": "int",
+            "value": "[parameters('VmCount')]"
+        }
+    }
+}
