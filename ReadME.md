@@ -52,4 +52,4 @@
     CheckWebServiceHealth.ps1 -WorkSpace ''
     ```
 
-![Architecture Diagram]('architecture.png')
+![Architecture Diagram](architecture.png)
